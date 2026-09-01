@@ -254,48 +254,34 @@ async def handle_shuffle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
     return NEGATIVE
 
+# Final Summary aur Quiz Generation Confirmation
 async def handle_negative_and_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['negative'] = float(update.message.text)
+    context.user_data['negative'] = update.message.text
+    
+    # Saare data ko variables me extract karna
     data = context.user_data
-
-    waiting_msg = await update.message.reply_text("🤖 **AI background configurations compute kar raha hai... Kripya thoda intezar karein...**", parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
-
-    questions = generate_bulk_questions_ai(
-        topic=data['topic'],
-        count=data['q_count'],
-        lang=data['language'],
-        difficulty=data['difficulty'],
-        options_cnt=data['options_count']
-    )
-
-    quiz_id = str(uuid.uuid4())[:8]
-
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO quizzes (quiz_id, creator_id, title, topic, q_count, language, difficulty, options_count, time_limit, shuffle, negative, questions_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (quiz_id, update.effective_user.id, data['title'], data['topic'], data['q_count'], data['language'], data['difficulty'], data['options_count'], data['time_limit'], data['shuffle'], data['negative'], json.dumps(questions)))
-    conn.commit()
-    conn.close()
-
-    bot_info = await context.bot.get_me()
-    share_link = f"https://t.me/{bot_info.username}?start=quiz_{quiz_id}"
-
+    
+    # Markdown ko hata kar HTML formatting use kar rahe hain taaki crash na ho
     summary = (
-        "🎉 **AI Quiz Generated Successfully!**\n\n"
-        f"🏷 **Title:** {data['title']}\n"
-        f"📝 **Questions:** {data['q_count']}\n"
-        f"🌐 **Language:** {data['language']}\n"
-        f"🎚 **Difficulty:** {data['difficulty']}\n"
-        f"⏱ **Time/Q:** {data['time_limit']} sec\n"
-        f"➖ **Negative Marking:** {data['negative']}\n\n"
-        f"🔗 **Play/Share Link:**\n{share_link}"
+        "<b>🎉 AI Quiz Generated Successfully!</b>\n\n"
+        f"🏷 <b>Title:</b> {data.get('title')}\n"
+        f"📝 <b>Questions:</b> {data.get('q_count')}\n"
+        f"🌐 <b>Language:</b> {data.get('language')}\n"
+        f"🎚 <b>Difficulty:</b> {data.get('difficulty')}\n"
+        f"🎛 <b>Options/Q:</b> {data.get('options_count')}\n"
+        f"🧾 <b>Explanation:</b> {data.get('explanation')}\n"
+        f"⏱ <b>Time/Q:</b> {data.get('time_limit')}\n"
+        f"🔀 <b>Shuffle:</b> {data.get('shuffle')}\n"
+        f"➖ <b>Negative:</b> {data.get('negative')}\n\n"
+        "🔗 <b>Share link:</b>\n"
+        f"<code>https://t.me_{update.effective_user.id}</code>"
     )
     
-    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=waiting_msg.message_id)
-    await update.message.reply_text(summary, parse_mode="Markdown")
+    # parse_mode ko "HTML" kar diya gaya hai
+    await update.message.reply_text(summary, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+    
     return ConversationHandler.END
+    
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("❌ Quiz setup processing setup abandoned.", reply_markup=ReplyKeyboardRemove())
