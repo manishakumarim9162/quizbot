@@ -5,9 +5,9 @@ import os
 import sqlite3
 import random
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup, Poll
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -15,7 +15,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     ConversationHandler,
     ContextTypes,
-    filters
+    filters,
+    JobQueue
 )
 from google import genai
 
@@ -65,6 +66,30 @@ def init_db():
             current_q_index INTEGER,
             score REAL,
             answers_json TEXT
+        )
+    """)
+    # Table to store Group Game Sessions
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS group_sessions (
+            session_id TEXT PRIMARY KEY,
+            quiz_id TEXT,
+            group_id INTEGER,
+            current_q_index INTEGER,
+            poll_message_id INTEGER,
+            started INTEGER,
+            started_at DATETIME,
+            participants_json TEXT
+        )
+    """)
+    # Table to store Group Participants
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS group_participants (
+            session_id TEXT,
+            user_id INTEGER,
+            username TEXT,
+            score REAL,
+            answered INTEGER,
+            PRIMARY KEY(session_id, user_id)
         )
     """)
     # Table to store Leaderboard Data
@@ -440,11 +465,257 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("❌ Quiz setup processing setup abandoned.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
+# --- GROUP GAME IMPLEMENTATION ---
+
+async def start_group_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, quiz_id: str):
+    """Start group quiz session"""
+    group_id = update.effective_chat.id
+    
+    # Quiz details get karna
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT title, questions_json, time_limit FROM quizzes WHERE quiz_id = ?", (quiz_id,))
+    row = cursor.fetchone()
+    
+    if not row:
+        await update.message.reply_text("❌ Quiz nahi mila!")
+        conn.close()
+        return
+    
+    title, questions_json, time_limit = row
+    
+    # Session ID generate karna
+    session_id = f"session_{uuid.uuid4().hex[:12]}"
+    
+    # Group session create karna
+    cursor.execute("""
+        INSERT INTO group_sessions (session_id, quiz_id, group_id, current_q_index, started, participants_json)
+        VALUES (?, ?, ?, 0, 0, ?)
+    """, (session_id, quiz_id, group_id, json.dumps({})))
+    conn.commit()
+    conn.close()
+    
+    # "I am Ready" panel message
+    ready_message = (
+        f"<b>🎮 {title}</b>\n\n"
+        f"📋 Participants ko neeche 'I am Ready' button par tap karna hai\n"
+        f"✅ Jab minimum 1 user ready ho jayega, quiz start hoga!\n\n"
+        f"<b>Ready Participants: 0</b>"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ I am Ready!", callback_data=f"ready_{session_id}")]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    
+    # Store session info in context
+    context.chat_data['active_session'] = session_id
+    context.chat_data['quiz_id'] = quiz_id
+    
+    msg = await update.message.reply_text(ready_message, parse_mode="HTML", reply_markup=markup)
+    
+    # Store message ID
+    context.chat_data['ready_message_id'] = msg.message_id
+
+async def handle_ready_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 'I am Ready' button click"""
+    query = update.callback_query
+    await query.answer()
+    
+    session_id = query.data.replace("ready_", "")
+    user_id = query.from_user.id
+    username = query.from_user.first_name or "User"
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    # Check if user already added
+    cursor.execute("SELECT * FROM group_participants WHERE session_id = ? AND user_id = ?", (session_id, user_id))
+    if cursor.fetchone():
+        conn.close()
+        await query.answer("❌ Tum pehle se ready ho!", show_alert=True)
+        return
+    
+    # Add participant
+    cursor.execute("""
+        INSERT INTO group_participants (session_id, user_id, username, score, answered)
+        VALUES (?, ?, ?, 0.0, 0)
+    """, (session_id, user_id, username))
+    
+    # Get all participants count
+    cursor.execute("SELECT COUNT(*) FROM group_participants WHERE session_id = ?", (session_id,))
+    count = cursor.fetchone()[0]
+    conn.commit()
+    
+    # Get group_id and quiz_id
+    cursor.execute("SELECT group_id, quiz_id, started FROM group_sessions WHERE session_id = ?", (session_id,))
+    group_data = cursor.fetchone()
+    conn.close()
+    
+    if not group_data:
+        return
+    
+    group_id, quiz_id, started = group_data
+    
+    # Update ready message
+    ready_message = (
+        f"<b>🎮 Group Quiz</b>\n\n"
+        f"📋 Participants ko 'I am Ready' button par tap karna hai\n"
+        f"✅ Jab minimum 1 user ready ho jayega, quiz shuru ho jayega!\n\n"
+        f"<b>Ready Participants: {count}</b>"
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ I am Ready!", callback_data=f"ready_{session_id}")]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    
+    # Edit ready message
+    if context.chat_data.get('ready_message_id'):
+        try:
+            await context.bot.edit_message_text(
+                chat_id=group_id,
+                message_id=context.chat_data['ready_message_id'],
+                text=ready_message,
+                parse_mode="HTML",
+                reply_markup=markup
+            )
+        except:
+            pass
+    
+    # Auto start when first user is ready
+    if count == 1 and started == 0:
+        await start_group_game(context, session_id, quiz_id, group_id)
+
+async def start_group_game(context: ContextTypes.DEFAULT_TYPE, session_id: str, quiz_id: str, group_id: int):
+    """Start the actual group game"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    # Mark as started
+    cursor.execute("UPDATE group_sessions SET started = 1, started_at = ? WHERE session_id = ?", 
+                  (datetime.now(), session_id))
+    
+    # Get quiz details
+    cursor.execute("SELECT questions_json, time_limit FROM quizzes WHERE quiz_id = ?", (quiz_id,))
+    quiz_data = cursor.fetchone()
+    questions = json.loads(quiz_data[0])
+    time_limit = quiz_data[1]
+    conn.commit()
+    conn.close()
+    
+    # Send first question as poll
+    await send_group_poll(context, session_id, quiz_id, group_id, questions, 0, time_limit)
+
+async def send_group_poll(context: ContextTypes.DEFAULT_TYPE, session_id: str, quiz_id: str, group_id: int, questions: list, q_idx: int, time_limit: int):
+    """Send poll for group quiz"""
+    if q_idx >= len(questions):
+        # Quiz complete
+        await end_group_game(context, session_id, quiz_id, group_id)
+        return
+    
+    q = questions[q_idx]
+    question_text = f"❓ Q{q_idx + 1}/{len(questions)}: {q['question']}"
+    
+    # Send poll
+    poll_msg = await context.bot.send_poll(
+        chat_id=group_id,
+        question=question_text,
+        options=q['options'],
+        type=Poll.QUIZ,
+        correct_option_id=q['correct'],
+        is_anonymous=False,
+        open_period=time_limit,
+        explanation="✅ Sahi jawab!"
+    )
+    
+    # Store poll info
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE group_sessions 
+        SET current_q_index = ?, poll_message_id = ? 
+        WHERE session_id = ?
+    """, (q_idx, poll_msg.message_id, session_id))
+    conn.commit()
+    conn.close()
+    
+    # Schedule next question after time_limit
+    context.job_queue.run_once(
+        process_poll_and_next_question,
+        when=timedelta(seconds=time_limit),
+        data={'session_id': session_id, 'quiz_id': quiz_id, 'group_id': group_id, 'q_idx': q_idx, 'questions': questions}
+    )
+
+async def process_poll_and_next_question(context: ContextTypes.DEFAULT_TYPE):
+    """Process current poll and send next question"""
+    data = context.job.data
+    session_id = data['session_id']
+    quiz_id = data['quiz_id']
+    group_id = data['group_id']
+    q_idx = data['q_idx']
+    questions = data['questions']
+    
+    # Get time limit for next question
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT time_limit FROM quizzes WHERE quiz_id = ?", (quiz_id,))
+    time_limit = cursor.fetchone()[0]
+    conn.close()
+    
+    # Send next question
+    await send_group_poll(context, session_id, quiz_id, group_id, questions, q_idx + 1, time_limit)
+
+async def end_group_game(context: ContextTypes.DEFAULT_TYPE, session_id: str, quiz_id: str, group_id: int):
+    """End group game and show leaderboard"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    # Get all participants
+    cursor.execute("""
+        SELECT user_id, username, score 
+        FROM group_participants 
+        WHERE session_id = ? 
+        ORDER BY score DESC 
+        LIMIT 10
+    """, (session_id,))
+    
+    results = cursor.fetchall()
+    
+    # Clean up session
+    cursor.execute("DELETE FROM group_sessions WHERE session_id = ?", (session_id,))
+    cursor.execute("DELETE FROM group_participants WHERE session_id = ?", (session_id,))
+    conn.commit()
+    conn.close()
+    
+    # Show leaderboard
+    leaderboard_text = "<b>🏆 Quiz Complete! Top 10 Results</b>\n\n"
+    
+    if results:
+        for idx, (user_id, username, score) in enumerate(results, 1):
+            leaderboard_text += f"{idx}. <b>{username}</b> → Score: <b>{score}</b>\n"
+    else:
+        leaderboard_text += "❌ No participants!"
+    
+    await context.bot.send_message(
+        chat_id=group_id,
+        text=leaderboard_text,
+        parse_mode="HTML"
+    )
+
 # --- ACTIVE GAMEPLAY LOOP IMPLEMENTATION ---
 
 async def start_quiz_game(update: Update, context: ContextTypes.DEFAULT_TYPE, quiz_id: str):
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     
+    # Check if group or private
+    if update.effective_chat.type in ['group', 'supergroup']:
+        # Group quiz
+        await start_group_quiz(update, context, quiz_id)
+        return
+    
+    # Private quiz
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT title, questions_json FROM quizzes WHERE quiz_id = ?", (quiz_id,))
@@ -632,6 +903,7 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_start_quiz_group, pattern="^start_group_"))
     application.add_handler(CallbackQueryHandler(handle_share_group_link, pattern="^share_link_"))
     application.add_handler(CallbackQueryHandler(handle_back_button, pattern="^back_"))
+    application.add_handler(CallbackQueryHandler(handle_ready_button, pattern="^ready_"))
 
     print("🚀 Production-ready Interactive Game Engine Started successfully.")
     application.run_polling()
