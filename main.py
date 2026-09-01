@@ -313,16 +313,14 @@ async def handle_negative_and_finish(update: Update, context: ContextTypes.DEFAU
         f"⏱ <b>Time/Q:</b> {data.get('time_limit')} sec\n"
         f"🔀 <b>Shuffle:</b> {data.get('shuffle')}\n"
         f"➖ <b>Negative:</b> {data.get('negative')}\n\n"
-        "<b>🎮 Ready to Play!</b>\n"
-        f"<b>Share this link to play:</b>\n"
-        f"<code>https://t.me/YOUR_BOT_USERNAME?start={quiz_id}</code>\n\n"
-        "<b>OR click button below to start immediately:</b>"
+        "<b>🎮 Ready to Play!</b>"
     )
     
-    # Inline button to start quiz immediately
+    # Inline buttons for Private Chat and Group Chat
     keyboard = [
-        [InlineKeyboardButton("🎮 Start Quiz Now", callback_data=f"start_quiz_{quiz_id}")],
-        [InlineKeyboardButton("📊 View on Leaderboard", callback_data="view_leaderboard")]
+        [InlineKeyboardButton("🎮 Start Quiz in Private", callback_data=f"start_private_{quiz_id}")],
+        [InlineKeyboardButton("👥 Start Quiz in Group", callback_data=f"start_group_{quiz_id}")],
+        [InlineKeyboardButton("🔗 Share Group Link", callback_data=f"share_link_{quiz_id}")]
     ]
     markup = InlineKeyboardMarkup(keyboard)
     
@@ -331,16 +329,112 @@ async def handle_negative_and_finish(update: Update, context: ContextTypes.DEFAU
     
     return ConversationHandler.END
 
-async def handle_start_quiz_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback handler for 'Start Quiz Now' button"""
+async def handle_start_quiz_private(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback handler for 'Start Quiz in Private' button"""
     query = update.callback_query
     await query.answer()
     
     # quiz_id ko extract karna callback_data se
-    quiz_id = query.data.replace("start_quiz_", "")
+    quiz_id = query.data.replace("start_private_", "")
     
-    # Quiz game start karna
+    # Quiz game start karna private chat mein
     await start_quiz_game(query, context, quiz_id)
+
+async def handle_start_quiz_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback handler for 'Start Quiz in Group' button"""
+    query = update.callback_query
+    await query.answer()
+    
+    # quiz_id ko extract karna callback_data se
+    quiz_id = query.data.replace("start_group_", "")
+    
+    # Bot username get karna
+    bot_info = await context.bot.get_me()
+    bot_username = bot_info.username
+    
+    # Group link banao
+    group_link = f"https://t.me/{bot_username}?start={quiz_id}"
+    
+    # Message with group link
+    group_message = (
+        f"👥 <b>Start Quiz in Group Chat</b>\n\n"
+        f"📌 <b>Share this link in your group:</b>\n\n"
+        f"<code>{group_link}</code>\n\n"
+        f"✅ Group members ko link par click karna hoga aur quiz start hoga!"
+    )
+    
+    await query.edit_message_text(group_message, parse_mode="HTML")
+
+async def handle_share_group_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback handler for 'Share Group Link' button"""
+    query = update.callback_query
+    await query.answer()
+    
+    # quiz_id ko extract karna callback_data se
+    quiz_id = query.data.replace("share_link_", "")
+    
+    # Bot username get karna
+    bot_info = await context.bot.get_me()
+    bot_username = bot_info.username
+    
+    # Group link banao
+    group_link = f"https://t.me/{bot_username}?start={quiz_id}"
+    
+    # Message with shareable link
+    share_message = (
+        f"🔗 <b>Quiz Share Link</b>\n\n"
+        f"<b>Copy this link aur apne group mein share karo:</b>\n\n"
+        f"<code>{group_link}</code>\n\n"
+        f"📱 <b>Or use the button below to share directly:</b>"
+    )
+    
+    # Share button
+    keyboard = [
+        [InlineKeyboardButton("📤 Share to Group", url=f"https://t.me/share/url?url={group_link}&text=🎯%20Quiz%20Challenge!")],
+        [InlineKeyboardButton("↩️ Back", callback_data=f"back_{quiz_id}")]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(share_message, parse_mode="HTML", reply_markup=markup)
+
+async def handle_back_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Go back to quiz summary"""
+    query = update.callback_query
+    await query.answer()
+    
+    quiz_id = query.data.replace("back_", "")
+    
+    # Quiz details get karna database se
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT title, q_count, language, difficulty, options_count, negative, time_limit, shuffle FROM quizzes WHERE quiz_id = ?", (quiz_id,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if row:
+        title, q_count, language, difficulty, options_count, negative, time_limit, shuffle = row
+        
+        summary = (
+            "<b>🎉 AI Quiz Generated Successfully!</b>\n\n"
+            f"🏷 <b>Title:</b> {title}\n"
+            f"📝 <b>Questions:</b> {q_count}\n"
+            f"🌐 <b>Language:</b> {language}\n"
+            f"🎚 <b>Difficulty:</b> {difficulty}\n"
+            f"🎛 <b>Options/Q:</b> {options_count}\n"
+            f"⏱ <b>Time/Q:</b> {time_limit} sec\n"
+            f"🔀 <b>Shuffle:</b> {shuffle}\n"
+            f"➖ <b>Negative:</b> {negative}\n\n"
+            "<b>🎮 Ready to Play!</b>"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("🎮 Start Quiz in Private", callback_data=f"start_private_{quiz_id}")],
+            [InlineKeyboardButton("👥 Start Quiz in Group", callback_data=f"start_group_{quiz_id}")],
+            [InlineKeyboardButton("🔗 Share Group Link", callback_data=f"share_link_{quiz_id}")]
+        ]
+        markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(summary, parse_mode="HTML", reply_markup=markup)
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("❌ Quiz setup processing setup abandoned.", reply_markup=ReplyKeyboardRemove())
@@ -534,7 +628,10 @@ def main():
     application.add_handler(CommandHandler("leaderboard", view_leaderboard))
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(handle_game_answer_click, pattern="^ans_"))
-    application.add_handler(CallbackQueryHandler(handle_start_quiz_button, pattern="^start_quiz_"))
+    application.add_handler(CallbackQueryHandler(handle_start_quiz_private, pattern="^start_private_"))
+    application.add_handler(CallbackQueryHandler(handle_start_quiz_group, pattern="^start_group_"))
+    application.add_handler(CallbackQueryHandler(handle_share_group_link, pattern="^share_link_"))
+    application.add_handler(CallbackQueryHandler(handle_back_button, pattern="^back_"))
 
     print("🚀 Production-ready Interactive Game Engine Started successfully.")
     application.run_polling()
