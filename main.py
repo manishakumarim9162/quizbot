@@ -256,10 +256,50 @@ async def handle_shuffle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # Final Summary aur Quiz Generation Confirmation
 async def handle_negative_and_finish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data['negative'] = update.message.text
+    context.user_data['negative'] = float(update.message.text)
     
     # Saare data ko variables me extract karna
     data = context.user_data
+    creator_id = update.effective_user.id
+    
+    # Loading message
+    await update.message.reply_text("⏳ **Generating AI Questions... Please wait!**", parse_mode="Markdown")
+    
+    # AI se questions generate karna
+    questions = generate_bulk_questions_ai(
+        topic=data.get('topic'),
+        count=data.get('q_count'),
+        lang=data.get('language'),
+        difficulty=data.get('difficulty'),
+        options_cnt=data.get('options_count')
+    )
+    
+    # Unique Quiz ID generate karna
+    quiz_id = f"quiz_{uuid.uuid4().hex[:12]}"
+    
+    # Database mein quiz save karna
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO quizzes 
+        (quiz_id, creator_id, title, topic, q_count, language, difficulty, options_count, time_limit, shuffle, negative, questions_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        quiz_id,
+        creator_id,
+        data.get('title'),
+        data.get('topic'),
+        data.get('q_count'),
+        data.get('language'),
+        data.get('difficulty'),
+        data.get('options_count'),
+        data.get('time_limit'),
+        data.get('shuffle'),
+        data.get('negative'),
+        json.dumps(questions)
+    ))
+    conn.commit()
+    conn.close()
     
     # Markdown ko hata kar HTML formatting use kar rahe hain taaki crash na ho
     summary = (
@@ -270,18 +310,37 @@ async def handle_negative_and_finish(update: Update, context: ContextTypes.DEFAU
         f"🎚 <b>Difficulty:</b> {data.get('difficulty')}\n"
         f"🎛 <b>Options/Q:</b> {data.get('options_count')}\n"
         f"🧾 <b>Explanation:</b> {data.get('explanation')}\n"
-        f"⏱ <b>Time/Q:</b> {data.get('time_limit')}\n"
+        f"⏱ <b>Time/Q:</b> {data.get('time_limit')} sec\n"
         f"🔀 <b>Shuffle:</b> {data.get('shuffle')}\n"
         f"➖ <b>Negative:</b> {data.get('negative')}\n\n"
-        "🔗 <b>Share link:</b>\n"
-        f"<code>https://t.me_{update.effective_user.id}</code>"
+        "<b>🎮 Ready to Play!</b>\n"
+        f"<b>Share this link to play:</b>\n"
+        f"<code>https://t.me/YOUR_BOT_USERNAME?start={quiz_id}</code>\n\n"
+        "<b>OR click button below to start immediately:</b>"
     )
     
+    # Inline button to start quiz immediately
+    keyboard = [
+        [InlineKeyboardButton("🎮 Start Quiz Now", callback_data=f"start_quiz_{quiz_id}")],
+        [InlineKeyboardButton("📊 View on Leaderboard", callback_data="view_leaderboard")]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    
     # parse_mode ko "HTML" kar diya gaya hai
-    await update.message.reply_text(summary, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(summary, parse_mode="HTML", reply_markup=markup)
     
     return ConversationHandler.END
+
+async def handle_start_quiz_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback handler for 'Start Quiz Now' button"""
+    query = update.callback_query
+    await query.answer()
     
+    # quiz_id ko extract karna callback_data se
+    quiz_id = query.data.replace("start_quiz_", "")
+    
+    # Quiz game start karna
+    await start_quiz_game(query, context, quiz_id)
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("❌ Quiz setup processing setup abandoned.", reply_markup=ReplyKeyboardRemove())
@@ -475,6 +534,7 @@ def main():
     application.add_handler(CommandHandler("leaderboard", view_leaderboard))
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(handle_game_answer_click, pattern="^ans_"))
+    application.add_handler(CallbackQueryHandler(handle_start_quiz_button, pattern="^start_quiz_"))
 
     print("🚀 Production-ready Interactive Game Engine Started successfully.")
     application.run_polling()
